@@ -13,19 +13,23 @@ ARG IMAGE_SOURCE="unknown"
 ARG IMAGE_VENDOR="unknown"
 ARG IMAGE_VERSION="unknown"
 ARG IMAGE_REVISION="unknown"
-ARG IMAGE_CREATED="unknown"
+ARG NWM_EVAL_MGR_ORG=NGWPC
+ARG NWM_EVAL_MGR_REF=development
+ARG NWM_EVAL_MGR_REVISION="unknown"
 
-# OCI Standard Labels
+# Image Labels: OCI-spec annotations followed by custom source-repo metadata.
 LABEL org.opencontainers.image.base.name="${BASE_NAME}" \
     org.opencontainers.image.base.digest="${BASE_DIGEST}" \
-    io.ngwpc.image.base.revision="${BASE_REVISION}" \
     org.opencontainers.image.source="${IMAGE_SOURCE}" \
     org.opencontainers.image.vendor="${IMAGE_VENDOR}" \
     org.opencontainers.image.version="${IMAGE_VERSION}" \
     org.opencontainers.image.revision="${IMAGE_REVISION}" \
-    org.opencontainers.image.created="${IMAGE_CREATED}" \
     org.opencontainers.image.title="NWM Verification" \
-    org.opencontainers.image.description="Docker image for the NWM verification application"
+    org.opencontainers.image.description="Docker image for the NWM verification application" \
+    io.ngwpc.image.base.revision="${BASE_REVISION}" \
+    io.ngwpc.eval.mgr.org="${NWM_EVAL_MGR_ORG}" \
+    io.ngwpc.eval.mgr.ref="${NWM_EVAL_MGR_REF}" \
+    io.ngwpc.eval.mgr.revision="${NWM_EVAL_MGR_REVISION}"
 
 
 # ensure local python is preferred over distribution python
@@ -136,10 +140,9 @@ RUN set -eux; \
         python3.10 -m venv ${VIRTUAL_ENV}
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
 
-ARG NWM_EVAL_MGR_REF=development
 RUN set -eux; \
 	\
-    pip3 install "git+https://github.com/NGWPC/nwm-eval-mgr.git@${NWM_EVAL_MGR_REF}" ; \
+    pip3 install "git+https://github.com/${NWM_EVAL_MGR_ORG}/nwm-eval-mgr.git@${NWM_EVAL_MGR_REF}" ; \
     pip3 cache purge
 
 COPY . /ngen-app/nwm-verf/

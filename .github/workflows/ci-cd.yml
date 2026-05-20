@@ -19,6 +19,10 @@ on:
       - release-candidate
   workflow_dispatch:
     inputs:
+      NWM_EVAL_MGR_ORG:
+        description: 'NWM_EVAL_MGR_ORG'
+        required: false
+        type: string
       NWM_EVAL_MGR_REF:
         description: 'NWM_EVAL_MGR_REF'
         required: false
@@ -32,6 +36,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   PYTHON_VERSION: '3.10.14'
+  BASE_NAME: rockylinux:8
 
 jobs:
   # set variables to use in other jobs
@@ -46,8 +51,11 @@ jobs:
       commit_sha_short: ${{ steps.vars.outputs.commit_sha_short }}
       test_image_tag: ${{ steps.vars.outputs.test_image_tag }}
       alias_tag: ${{ steps.vars.outputs.alias_tag }}
-      build_date: ${{ steps.vars.outputs.build_date }}
       clean_ref: ${{ steps.vars.outputs.clean_ref }}
+      base_name: ${{ steps.vars.outputs.base_name }}
+      base_digest: ${{ steps.vars.outputs.base_digest }}
+      base_revision: ${{ steps.vars.outputs.base_revision }}
+      nwm_eval_mgr_revision: ${{ steps.vars.outputs.nwm_eval_mgr_revision }}
     steps:
       - name: Compute image vars
         id: vars
@@ -62,9 +70,6 @@ jobs:
 
           # one datetime for all time variables
           NOW=$(date -u +'%Y-%m-%d %H:%M:%S')
-
-          # for OCI labels
-          BUILD_DATE=$(date -u -d "$NOW" +'%Y-%m-%dT%H:%M:%SZ')
 
           # for Docker image tags
           TIMESTAMP=$(date -u -d "$NOW" +'%Y%m%d%H%M%SZ')
@@ -100,15 +105,45 @@ jobs:
             ALIAS="${TIMESTAMP}-${CLEAN_REF}"
           fi
 
+          # skopeo is needed to inspect the base image
+          if ! command -v skopeo >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends skopeo
+          fi
+
+          # base image metadata for Dockerfile labels
+          BASE_INSPECT=$(skopeo inspect --override-os linux --override-arch amd64 "docker://${BASE_NAME}")
+          BASE_DIGEST=$(echo "$BASE_INSPECT" | jq -r '.Digest // "unknown"')
+          BASE_REVISION=$(echo "$BASE_INSPECT" | jq -r '.Labels["org.opencontainers.image.revision"] // .Labels["io.ngwpc.image.base.revision"] // "unknown"')
+
+          # resolve each source repo's ref (branch/tag/SHA) to its commit SHA for revision labels
+          resolve_sha() {
+            local url="$1" ref="$2" out sha
+            # a full 40-char SHA can't be looked up via ls-remote; use it directly
+            if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "$ref"; return; fi
+            out=$(git ls-remote "$url" "$ref" "refs/tags/${ref}^{}" 2>/dev/null)
+            # prefer the dereferenced commit (^{}) for annotated tags; else first match
+            sha=$(echo "$out" | grep '\^{}$' | head -n1 | cut -f1)
+            [ -z "$sha" ] && sha=$(echo "$out" | head -n1 | cut -f1)
+            echo "${sha:-unknown}"
+          }
+
+          NWM_EVAL_MGR_REVISION=$(resolve_sha "https://github.com/${{ inputs.NWM_EVAL_MGR_ORG || github.repository_owner }}/nwm-eval-mgr.git" "${{ inputs.NWM_EVAL_MGR_REF || 'development' }}")
+
           # save outputs
-          echo "org=${ORG}" >> "$GITHUB_OUTPUT"
-          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
-          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
-          echo "test_image_tag=${TEST_TAG}" >> "$GITHUB_OUTPUT"
-          echo "alias_tag=${ALIAS}" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=${REAL_SHA}" >> "$GITHUB_OUTPUT"
-          echo "commit_sha_short=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "clean_ref=${CLEAN_REF}" >> "$GITHUB_OUTPUT"
+          cat >> "$GITHUB_OUTPUT" <<EOF
+          org=${ORG}
+          image_base=${IMAGE_BASE}
+          test_image_tag=${TEST_TAG}
+          alias_tag=${ALIAS}
+          commit_sha=${REAL_SHA}
+          commit_sha_short=${SHORT_SHA}
+          clean_ref=${CLEAN_REF}
+          base_name=${BASE_NAME}
+          base_digest=${BASE_DIGEST}
+          base_revision=${BASE_REVISION}
+          nwm_eval_mgr_revision=${NWM_EVAL_MGR_REVISION}
+          EOF
 
   # CodeQL scan
   codeql-scan:
@@ -164,12 +199,16 @@ jobs:
           push: true
           tags: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}
           build-args: |
+            NWM_EVAL_MGR_ORG=${{ inputs.NWM_EVAL_MGR_ORG || github.repository_owner }}
             NWM_EVAL_MGR_REF=${{ inputs.NWM_EVAL_MGR_REF || 'development' }}
+            NWM_EVAL_MGR_REVISION=${{ needs.setup.outputs.nwm_eval_mgr_revision }}
+            BASE_NAME=${{ needs.setup.outputs.base_name }}
+            BASE_DIGEST=${{ needs.setup.outputs.base_digest }}
+            BASE_REVISION=${{ needs.setup.outputs.base_revision }}
             IMAGE_SOURCE=https://github.com/${{ github.repository }}
             IMAGE_VENDOR=${{ github.repository_owner }}
             IMAGE_VERSION=${{ needs.setup.outputs.clean_ref }}
             IMAGE_REVISION=${{ needs.setup.outputs.commit_sha }}
-            IMAGE_CREATED=${{ needs.setup.outputs.build_date }}
 
   # run unit tests inside the Docker image
   unit-test:
