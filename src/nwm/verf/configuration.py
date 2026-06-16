@@ -129,7 +129,7 @@ class NWMForecastConfig(BaseModel):
 class FlowObservationConfig(BaseModel):
     """Data model for the 'flow_observation' section of the config file"""
 
-    usgs: Optional[Dict[str, Union[str, int, bool]]] = None
+    usgs: Optional[Dict[str, Union[str, int, bool]]] | None = None
 
 
 class PairDataConfig(BaseModel):
@@ -271,10 +271,21 @@ class Config(BaseModel):
     general: GeneralConfig
     file_paths: FilePathsConfig
     nwm_forecast: NWMForecastConfig
-    flow_observation: FlowObservationConfig
+    # flow_observation: Optional[FlowObservationConfig] = None
+    flow_observation: FlowObservationConfig = Field(
+        default_factory=FlowObservationConfig
+    )
     pair_data: PairDataConfig
     metrics: MetricsConfig
     plots: PlotsConfig
+
+    @field_validator("flow_observation", mode="before")
+    @classmethod
+    def default_flow_observation(cls, v):
+        """Provide a default empty configuration for flow_observation if it is not provided in the config file."""
+        if v is None:
+            return {}
+        return v
 
     @model_validator(mode="after")
     def check_dataset_configuration(self):

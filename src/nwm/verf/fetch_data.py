@@ -498,7 +498,8 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
 
     # check existing parquet files of usgs obs and get the dates for previously downloaded data
     dates0 = list()
-    if not conf2["overwrite_output"]:
+    overwrite = (conf2 or {}).get("overwrite_output", False)
+    if not overwrite:
         dates0 = check_existing_obs_data(str(output_dir))
         dates0 = [x.strftime("%Y-%m-%d") for x in dates0]
         if len(dates0) > 0:
