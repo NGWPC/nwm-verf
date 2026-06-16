@@ -335,9 +335,10 @@ class Config(BaseModel):
         """Check that at least one observation data source is provided (USGS or obs_data_file)."""
         has_usgs = self.flow_observation.usgs is not None
         has_obs_file = self.file_paths.obs_data_file is not None
+        has_obs_dir = self.file_paths.obs_data_dir is not None
 
-        if not has_usgs and not has_obs_file:
-            msg = "Either 'flow_observation.usgs' or 'file_paths.obs_data_file' must be provided."
+        if not has_usgs and not has_obs_file and not has_obs_dir:
+            msg = "Either 'flow_observation.usgs', 'file_paths.obs_data_file', or 'file_paths.obs_data_dir' must be provided."
             logger.error(msg)
             raise ValueError(msg)
 
