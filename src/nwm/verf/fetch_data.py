@@ -16,8 +16,10 @@ from dask.distributed import (  # install with 'pip install dask[complete]'
     Client,
     LocalCluster,
 )
+from pandas.api.types import is_numeric_dtype, is_object_dtype, is_string_dtype
 from teehr.loading.usgs.usgs import usgs_to_parquet
 
+from .identify_location_ids import find_locations_in_crosswalk
 from .nwm_configs import ForecastConfig
 from .settings import default_txdot_gage_list
 from .utils import create_time_sequence, get_n_workers, read_data, save_data
@@ -301,6 +303,166 @@ def fetch_txdot_gage_data(
         df_all.to_parquet(output_file, index=False)
 
 
+def get_obs_files(conf: dict) -> list[Path]:
+    """Get the list of existing observation files."""
+    obs_path = conf.get("obs_data_dir", None)
+    obs_file = conf.get("obs_data_file", None)
+
+    # gather observation files from both obs_data_dir and obs_data_file (if specified)
+    obs_files = []
+
+    if obs_path:
+        obs_path = Path(obs_path)
+        if not obs_path.exists():
+            msg = f"Observation data path {obs_path} does not exist. Ignore this path."
+            logger.warning(msg)
+        else:
+            # identify all observation files in csv or parquet format in obs_path
+            obs_files = list(obs_path.glob("*.parquet")) + list(obs_path.glob("*.csv"))
+
+    if obs_file:
+        obs_file = Path(obs_file)
+        if not obs_file.exists():
+            msg = f"Observation data file {obs_file} does not exist. Ignore this file."
+            logger.warning(msg)
+        else:
+            obs_files = obs_files + [Path(obs_file)]
+
+    return obs_files
+
+
+def read_obs_data(locations: list, conf: dict, output_dir: Path) -> pd.DataFrame:
+    """Read observation data from a list of file paths (in csv or parquet format) and concatenate them into a single DataFrame."""
+    # get gage agency
+    agency_lookup = get_gage_agency(
+        locations, next(iter(conf["file_paths"]["crosswalk_file"].values()))
+    )
+
+    df_all = pd.DataFrame()
+    obs_files = get_obs_files(conf.get("file_paths", {}))
+    for file_path in obs_files:
+        file_path = Path(file_path)
+        logger.info(f"Reading observation data from file: {file_path}")
+        df = read_data(file_path)
+
+        # function to detect time column
+        def detect_time_column(df: pd.DataFrame, time_col: str = "time"):
+            for col in df.columns:
+                if is_object_dtype(df[col]) or is_string_dtype(df[col]):
+                    parsed = pd.to_datetime(df[col], errors="coerce")
+                    if parsed.notna().all():
+                        if col.lower() != time_col:
+                            logger.info(
+                                f"Using '{col}' as 'time' column for the observation file"
+                            )
+                        return col
+
+            msg = "No column in the observation file contains fully valid datetimes"
+            logger.error(msg)
+            raise ValueError(msg)
+
+        # function to detect flow column
+        def detect_flow_column(df: pd.DataFrame, flow_col: str = "obs_flow"):
+            for col in df.columns:
+                if is_numeric_dtype(df[col]):
+                    if col.lower() != flow_col:
+                        logger.info(
+                            f"Using '{col}' as 'obs_flow' column for the observation file"
+                        )
+                    return col
+
+            msg = "No column in the observation file contains numeric flow values"
+            logger.error(msg)
+            raise ValueError(msg)
+
+        # if 'time' column not present, try to detect it
+        time_col = "time" if "time" in df.columns else detect_time_column(df)
+        df = df.rename(columns={time_col: "value_time"})
+        df["value_time"] = pd.to_datetime(df["value_time"], errors="raise")
+
+        # if 'obs_flow' column not present, try to detect it
+        flow_col = "obs_flow" if "obs_flow" in df.columns else detect_flow_column(df)
+        df = df.rename(columns={flow_col: "value"})
+
+        # add a few extra columns for compatibility with teehr if not already present
+        df["reference_time"] = df["value_time"]
+        df["variable_name"] = conf.get("general", {}).get("variable_name", "streamflow")
+        df["measurement_unit"] = "m3/s"
+        df["configuration"] = "observed"
+
+        # get location_id from file name if not present in the dataframe
+        if "location_id" not in df.columns:
+            if "_" not in file_path.stem:
+                msg = (
+                    f"Cannot determine location_id from filename '{file_path.name}'. "
+                    "Expected filename stem to contain '_' "
+                    "(e.g., '01123000_hourly_discharge.csv')."
+                )
+                logger.warning(msg)
+                continue
+
+            location_id = file_path.stem.split("_")[0]
+            if location_id not in locations:
+                msg = (
+                    f"Location ID '{location_id}' from filename '{file_path.name}' "
+                    "is not in the list of specified locations. Skipping this file."
+                )
+                logger.info(msg)
+                continue
+
+            # add gage agency as a prefix to location_id for consistency with teehr (e.g., 'usgs-01123000')
+            df["location_id"] = (
+                f"{agency_lookup.get(location_id, 'unknown')}-{location_id}"
+            )
+
+        else:
+            # filter to only the specified locations
+            df = df[df["location_id"].isin(locations)]
+
+            # add gage agency as a prefix to location_id
+            agency = df["location_id"].map(agency_lookup)
+            df["location_id"] = agency + "-" + df["location_id"].astype(str)
+
+        # reorder columns
+        df = df[
+            [
+                "location_id",
+                "reference_time",
+                "value_time",
+                "value",
+                "variable_name",
+                "measurement_unit",
+                "configuration",
+            ]
+        ]
+
+        df_all = pd.concat([df_all, df], ignore_index=True)
+
+    # remove duplicates if any
+    df_all = df_all.drop_duplicates(subset=["location_id", "value_time"])
+
+    # save data to parquet files
+    if not df_all.empty:
+        start1 = df_all["value_time"].min().strftime("%Y-%m-%dT%H:%M:%S")
+        end1 = df_all["value_time"].max().strftime("%Y-%m-%dT%H:%M:%S")
+        output_file = Path(output_dir) / f"{start1}_{end1}_local.parquet"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        df_all.to_parquet(output_file, index=False)
+
+    return
+
+
+def get_gage_agency(gages: list, cwt_file: str | Path) -> dict:
+    """Get the agency for each gage ID based on the crosswalk file."""
+    cwt = read_data(cwt_file)
+    lookup, miss_ids = find_locations_in_crosswalk(
+        gages,
+        cwt,
+    )
+    gage_agency = {gage: lookup[gage].split("-")[0] for gage in gages if gage in lookup}
+    return gage_agency
+
+
 def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
     """Retrieve USGS streamflow observations given configuration and a list of gage IDs.
 
@@ -313,13 +475,22 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
 
     """
     # get the list of unique USGS gage IDs
-    list_usgs = list(
+    list_all = list(
         {item for subdict in locations.values() for item in subdict["primary"]}
     )
 
+    # gage category by agency
+    cwt_file = next(iter(conf["file_paths"]["crosswalk_file"].values()))
+    gage_agency = get_gage_agency(list_all, cwt_file)
+
+    list_usgs = [k for k, v in gage_agency.items() if v.lower() == "usgs"]
+
     list_txdot = get_txdot_gage_list(conf)
     list_txdot = [gage for gage in list_txdot if gage in list_usgs]
-    list_non_txdot = [gage for gage in list_usgs if gage not in list_txdot]
+    list_usgs = [gage for gage in list_usgs if gage not in list_txdot]
+
+    # read obs data in existing files
+    read_obs_data(list_all, conf, output_dir)
 
     # get some general information
     conf1 = conf["general"]
@@ -332,7 +503,7 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
         dates0 = [x.strftime("%Y-%m-%d") for x in dates0]
         if len(dates0) > 0:
             logger.info(
-                f"  Existing USGS parquet files for {min(dates0)} to {max(dates0)} will be used"
+                f"  Existing observed parquet files for {min(dates0)} to {max(dates0)} will be used"
             )
 
     # identify start and end dates of observations required by all NWM forecasts datasets
@@ -370,7 +541,9 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
     dates1 = [d1 for d1 in dates if d1 not in dates0]
 
     if len(dates1) == 0:
-        logger.info("  USGS data for all required dates already exist")
+        logger.info(
+            "  Observed data for all required dates and locations already exist"
+        )
     else:
         # create data path
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -398,7 +571,7 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
         hourly = False if timestep1 < 1 else True
         for d1 in date_list:
             # fetch data for standard usgs (non-TxDOT) gages
-            if list_non_txdot:
+            if list_usgs:
                 use_dask = (
                     conf["nwm_forecast"]["data_source"] != "ngenCERF" and n_workers > 1
                 )
@@ -418,7 +591,7 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
                     ):
                         try:
                             safe_fetch_usgs(
-                                list_non_txdot, d1, conf2, str(output_dir), hourly
+                                list_usgs, d1, conf2, str(output_dir), hourly
                             )
                         except (ServerDisconnectedError, ClientOSError) as e:
                             logger.warning(
@@ -429,9 +602,7 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
                         "  Running USGS fetch without Dask (single-process mode)"
                     )
                     try:
-                        safe_fetch_usgs(
-                            list_non_txdot, d1, conf2, str(output_dir), hourly
-                        )
+                        safe_fetch_usgs(list_usgs, d1, conf2, str(output_dir), hourly)
                     except (ServerDisconnectedError, ClientOSError) as e:
                         logger.warning(f"Failed to fetch USGS data after retries: {e}")
 
@@ -452,7 +623,7 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
         logger.info(f"  Observation data are saved in parquet files at: {output_dir}")
 
     # Check for missing observation data after retrieval
-    check_missing_obs_data(output_dir, conf, list_usgs)
+    check_missing_obs_data(output_dir, conf, list_all)
 
 
 def get_fcst_files(conf: dict, dataset: str) -> list[Path]:
