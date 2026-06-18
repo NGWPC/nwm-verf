@@ -102,6 +102,8 @@ class FilePathsConfig(BaseModel):
     fcst_config_file: Optional[str | Path] = None
     fcst_data_file: Optional[Path | str | Dict[str, Path] | Dict[str, str]] = None
     fcst_data_dir: Optional[Path | str | Dict[str, Path] | Dict[str, str]] = None
+    obs_data_file: Optional[Path | str] = None
+    obs_data_dir: Optional[Path | str] = None
     calib_param_file: Optional[Path | str] = None
     txdot_gage_file: Optional[Path | str] = None
     output_dir: str | Path
@@ -127,7 +129,7 @@ class NWMForecastConfig(BaseModel):
 class FlowObservationConfig(BaseModel):
     """Data model for the 'flow_observation' section of the config file"""
 
-    usgs: Dict[str, Union[str, int, bool]]
+    usgs: Optional[Dict[str, Union[str, int, bool]]] | None = None
 
 
 class PairDataConfig(BaseModel):
@@ -269,14 +271,25 @@ class Config(BaseModel):
     general: GeneralConfig
     file_paths: FilePathsConfig
     nwm_forecast: NWMForecastConfig
-    flow_observation: FlowObservationConfig
+    # flow_observation: Optional[FlowObservationConfig] = None
+    flow_observation: FlowObservationConfig = Field(
+        default_factory=FlowObservationConfig
+    )
     pair_data: PairDataConfig
     metrics: MetricsConfig
     plots: PlotsConfig
 
+    @field_validator("flow_observation", mode="before")
+    @classmethod
+    def default_flow_observation(cls, v):
+        """Provide a default empty configuration for flow_observation if it is not provided in the config file."""
+        if v is None:
+            return {}
+        return v
+
     @model_validator(mode="after")
     def check_dataset_configuration(self):
-        """Check that the following fields has the same lenght as dataset_name.
+        """Check that the following fields has the same length as dataset_name.
 
         Fields include: nwm_version, forecast_start_date, forecast_end_date, eval_start_date, eval_end_date.
         """
@@ -315,6 +328,20 @@ class Config(BaseModel):
             msg += "nwm_forecast.data_source is not 'GCS'"
             logger.error(msg)
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def check_obs_source(self):
+        """Check that at least one observation data source is provided (USGS or obs_data_file)."""
+        has_usgs = self.flow_observation.usgs is not None
+        has_obs_file = self.file_paths.obs_data_file is not None
+        has_obs_dir = self.file_paths.obs_data_dir is not None
+
+        if not has_usgs and not has_obs_file and not has_obs_dir:
+            msg = "Either 'flow_observation.usgs', 'file_paths.obs_data_file', or 'file_paths.obs_data_dir' must be provided."
+            logger.error(msg)
+            raise ValueError(msg)
+
         return self
 
     @model_validator(mode="after")

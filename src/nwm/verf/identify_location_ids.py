@@ -14,29 +14,91 @@ __all__ = [
     "get_link_id_from_file",
     "get_locations_from_config_list",
     "get_nwm_link_ids",
+    "find_locations_in_crosswalk",
     "get_gage_by_link",
     "get_gage_id_from_file",
-    "get_usgs_gage_ids",
+    "get_gage_ids",
 ]
 
 
-# get location link ID based on gage ID and crosswalk
+def find_locations_in_crosswalk(
+    locations: list[str],
+    cwt: pd.DataFrame,
+) -> tuple[dict[str, str], list[str]]:
+    """Find the primary_location_id for the given locations based on the crosswalk file.
+
+    Args:
+        locations: A list of location IDs to find in the crosswalk.
+        cwt: A DataFrame containing the crosswalk data.
+
+    Returns:
+        A tuple containing:
+        - A dictionary mapping found location IDs to their primary_location_id.
+        - A list of location IDs that were not found in the crosswalk.
+
+    """
+
+    # Build a lookup dictionary from the crosswalk data for efficient searching
+    def build_location_lookup(cwt: pd.DataFrame) -> dict[str, str]:
+        lookup = {}
+
+        for primary_id in cwt["primary_location_id"].dropna().astype(str):
+            try:
+                _, location_id = primary_id.split("-", 1)
+            except ValueError:
+                logger.warning(f"Unexpected primary_location_id format: {primary_id}")
+                continue
+
+            if location_id in lookup:
+                logger.warning(
+                    f"Duplicate location id '{location_id}' found: "
+                    f"{lookup[location_id]} and {primary_id}"
+                )
+
+            lookup[location_id] = primary_id
+
+        return lookup
+
+    location_lookup = build_location_lookup(cwt)
+
+    found = {
+        loc: location_lookup[loc] for loc in locations if loc in location_lookup.keys()
+    }
+
+    missed = [loc for loc in locations if loc not in found.keys()]
+
+    return found, missed
+
+
 def get_link_by_gage(gages: List[str], crosswalk_file: str):
+    """Get location link ID based on gage ID and crosswalk file.
+
+    Args:
+        gages: A list of gage IDs.
+        crosswalk_file: Path to the crosswalk CSV file.
+
+    Returns:
+        A tuple containing:
+        - A list of gage IDs found in the crosswalk.
+        - A list of corresponding location link IDs.
+
+    """
     cwt = read_data(crosswalk_file)
-    cwt.rename(columns={"primary_location_id": "gage"}, inplace=True)
 
-    df = pd.DataFrame(list(map("usgs-".__add__, gages)), columns=["gage"])
-    df1 = df.merge(cwt, on="gage", how="inner")
-    miss_ids = []
-    if len(df1) < len(df):
-        miss_ids = [x for x in df["gage"].tolist() if x not in df1["gage"].tolist()]
-        logger.info(
-            f"  Link ID for gages {miss_ids} are not found in crosswalk file {crosswalk_file}"
-        )
+    lookup, miss_ids = find_locations_in_crosswalk(
+        gages,
+        cwt,
+    )
 
-    gages1 = [x[1] for x in df1["gage"].str.split("-")]
-    # links1 = [int(x[1]) for x in df1["secondary_location_id"].str.split("-")]
-    links1 = [x[1] for x in df1["secondary_location_id"].str.split("-")]
+    cwt = cwt.set_index("primary_location_id")
+
+    gages1 = []
+    links1 = []
+
+    for gage, primary_location_id in lookup.items():
+        sec_id = cwt.at[primary_location_id, "secondary_location_id"]
+        links1.append(sec_id.split("-", 1)[1] if "-" in sec_id else sec_id)
+        gages1.append(gage)
 
     return gages1, links1
 
@@ -191,8 +253,7 @@ def get_gage_id_from_file(
     return locations
 
 
-# get USGS ID for the locations from config.yaml or a separate file
-def get_usgs_gage_ids(conf: dict) -> list:
+def get_gage_ids(conf: dict) -> list:
     location_list = conf["general"]["location_list"]
     location_list_file = conf["file_paths"]["location_list_file"]
     crosswalk_file = conf["file_paths"]["crosswalk_file"]
@@ -205,7 +266,8 @@ def get_usgs_gage_ids(conf: dict) -> list:
         locations = get_gage_id_from_file(location_list_file, crosswalk_file)
     else:
         # retrieve all gage IDs from crosswalk file
-        df = read_data(crosswalk_file[list(crosswalk_file.keys())[0]])
+        crosswalk_path = next(iter(crosswalk_file.values()))
+        df = read_data(crosswalk_path)
         logger.info(
             "  No location_list nor location_list_file is provided in the config file. "
             "Retrieving all gage IDs from the crosswalk file..."
@@ -259,25 +321,19 @@ def get_usgs_gage_ids(conf: dict) -> list:
         locations = df["primary_location_id"].tolist()
         locations = [x.split("-")[1] for x in locations]
 
-    # only accept usgs locations for now
-    df = read_data(crosswalk_file[list(crosswalk_file.keys())[0]])
-    locations = ["usgs-" + x for x in locations]
-    gages = [x for x in locations if x in df["primary_location_id"].values]
-
-    missed = [x for x in locations if x not in gages]
-    if len(missed) > 0:
-        logger.info(
-            f"  The following locations are not found in the crosswalk file: {missed}"
-        )
-
-    gages = [x.replace("usgs-", "") for x in gages]
+    cwt = read_data(crosswalk_file[list(crosswalk_file.keys())[0]])
+    found, _ = find_locations_in_crosswalk(
+        locations,
+        cwt,
+    )
+    gages = list(found.keys())
 
     return gages
 
 
 def identify_locations(conf: dict) -> dict:
     # get USGS gage ID for verification locations
-    locations_usgs = get_usgs_gage_ids(conf)
+    locations_usgs = get_gage_ids(conf)
 
     locations = {}
     for dataset_idx, dataset in enumerate(conf["general"]["dataset_name"]):

@@ -868,6 +868,9 @@ def create_time_series(conf: dict, data_paths: dict):
         logger.error("No data available to create time series plot.")
         return
 
+    # remove duplicates if any
+    merged_df = merged_df.drop_duplicates()
+
     # Ensure datetime
     merged_df["value_time"] = pd.to_datetime(merged_df["value_time"])
     merged_df["reference_time"] = pd.to_datetime(merged_df["reference_time"])
