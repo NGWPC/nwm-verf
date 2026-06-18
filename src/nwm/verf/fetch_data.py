@@ -154,7 +154,9 @@ def check_missing_obs_data(obs_dir: str | Path, conf: dict, gages: list):
             logger.info(
                 f"{dataset} - Number of gages with observation data available: {len(existing_gages)}"
             )
-            missing_gages = [g for g in gages if f"usgs-{g}" not in existing_gages]
+            existing_gages_no_prefix = [g.split("-", 1)[1] for g in existing_gages]
+            missing_gages = [g for g in gages if g not in existing_gages_no_prefix]
+
             if missing_gages:
                 logger.warning(
                     f"{dataset} - Missing observation data for {len(missing_gages)} gages."
