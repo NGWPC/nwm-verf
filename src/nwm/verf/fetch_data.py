@@ -492,9 +492,12 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
     # read obs data in existing files
     read_obs_data(list_all, conf, output_dir)
 
-    # get some general information
-    conf1 = conf["general"]
+    # if flow_observation.usgs section not present or empty in config, skip retrieval
     conf2 = conf["flow_observation"]["usgs"]
+    if not conf2:
+        # Check for missing observation data after retrieval
+        check_missing_obs_data(output_dir, conf, list_all)
+        return
 
     # check existing parquet files of usgs obs and get the dates for previously downloaded data
     dates0 = list()
@@ -509,6 +512,7 @@ def retrieve_usgs_obs(locations: dict, conf: dict, output_dir: Path):
 
     # identify start and end dates of observations required by all NWM forecasts datasets
     dates = list()
+    conf1 = conf["general"]
     for i1 in range(len(conf1["forecast_start_date"])):
         start_date = conf1["forecast_start_date"][i1]
         end_date = conf1["forecast_end_date"][i1]
